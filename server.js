@@ -16,7 +16,7 @@ if (!process.env.GEMINI_API_KEY) {
   process.exit(1);
 }
 
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-04-17:generateContent?key=${process.env.GEMINI_API_KEY}`;
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 app.use(cors());
