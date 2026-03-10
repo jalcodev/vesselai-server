@@ -16,7 +16,7 @@ if (!process.env.GEMINI_API_KEY) {
   process.exit(1);
 }
 
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-04-17:generateContent?key=${process.env.GEMINI_API_KEY}`;
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 app.use(cors());
@@ -158,6 +158,6 @@ app.post('/chat', dailyLimiter, chatLimiter, async (req, res) => {
 // ─── Start ────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`VesselAI server running on port ${PORT}`);
-  console.log(`AI: Google Gemini 2.0 Flash (free tier)`);
+  console.log(`AI: Google Gemini 2.5 Flash (free tier)`);
   console.log(`Health check: http://localhost:${PORT}/health`);
 });
