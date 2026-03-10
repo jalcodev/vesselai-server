@@ -1,6 +1,5 @@
 // vesselai-server/server.js
-// Proxy server — sits between the Vessel Check app and Anthropic API.
-// Your Anthropic key stays here on the server. Users never see it.
+// Proxy server — uses Google Gemini (free tier) for AI responses.
 
 require('dotenv').config();
 const express = require('express');
@@ -11,20 +10,21 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ─── Validate env ─────────────────────────────────────────────────────────────
-if (!process.env.ANTHROPIC_API_KEY) {
-  console.error('ERROR: ANTHROPIC_API_KEY environment variable is not set.');
+if (!process.env.GEMINI_API_KEY) {
+  console.error('ERROR: GEMINI_API_KEY environment variable is not set.');
   console.error('Add it in your Render dashboard under Environment Variables.');
   process.exit(1);
 }
 
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+
 // ─── Middleware ───────────────────────────────────────────────────────────────
-app.use(cors()); // Allow requests from the mobile app
-app.use(express.json({ limit: '10kb' })); // Limit request body size
+app.use(cors());
+app.use(express.json({ limit: '10kb' }));
 
 // ─── Rate limiting ────────────────────────────────────────────────────────────
-// 20 messages per IP per 15 minutes — prevents abuse
 const chatLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
+  windowMs: 15 * 60 * 1000,
   max: 20,
   standardHeaders: true,
   legacyHeaders: false,
@@ -34,9 +34,8 @@ const chatLimiter = rateLimit({
   },
 });
 
-// Daily limit — 100 messages per IP per day
 const dailyLimiter = rateLimit({
-  windowMs: 24 * 60 * 60 * 1000, // 24 hours
+  windowMs: 24 * 60 * 60 * 1000,
   max: 100,
   standardHeaders: true,
   legacyHeaders: false,
@@ -50,7 +49,7 @@ const dailyLimiter = rateLimit({
 const SYSTEM_PROMPT = `You are VesselAI, an expert marine assistant built into the Vessel Check app. You have deep expertise in:
 
 - Sailing and seamanship (all levels, from beginner to offshore)
-- Motor yacht operation and handling  
+- Motor yacht operation and handling
 - Marine safety, COLREGS, and regulations
 - Boat maintenance, troubleshooting, and repairs
 - Weather interpretation for mariners (reading forecasts, wind, tides)
@@ -63,11 +62,7 @@ You are practical, safety-conscious, and give clear, actionable advice. When saf
 
 // ─── Health check ─────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
-  res.json({
-    status: 'online',
-    service: 'VesselAI Server',
-    version: '1.0.0',
-  });
+  res.json({ status: 'online', service: 'VesselAI Server', version: '1.1.0', ai: 'Gemini' });
 });
 
 app.get('/health', (req, res) => {
@@ -78,7 +73,6 @@ app.get('/health', (req, res) => {
 app.post('/chat', dailyLimiter, chatLimiter, async (req, res) => {
   const { messages, vesselName, vesselType, contextTitle, contextData } = req.body;
 
-  // Validate input
   if (!messages || !Array.isArray(messages) || messages.length === 0) {
     return res.status(400).json({ error: 'messages array is required' });
   }
@@ -86,12 +80,6 @@ app.post('/chat', dailyLimiter, chatLimiter, async (req, res) => {
   if (messages.length > 50) {
     return res.status(400).json({ error: 'Conversation too long. Please start a new chat.' });
   }
-
-  // Sanitise messages — only pass role and content to Anthropic
-  const sanitisedMessages = messages.map(m => ({
-    role: m.role === 'user' ? 'user' : 'assistant',
-    content: String(m.content).slice(0, 2000), // cap per message
-  }));
 
   // Build contextual system prompt
   let systemPrompt = SYSTEM_PROMPT;
@@ -102,34 +90,58 @@ app.post('/chat', dailyLimiter, chatLimiter, async (req, res) => {
     systemPrompt += `\n\nThe user is viewing their ${contextTitle} screen. Current data for context:\n${JSON.stringify(contextData, null, 2).slice(0, 3000)}`;
   }
 
+  // Convert messages to Gemini format
+  // Gemini uses 'user' and 'model' roles (not 'assistant')
+  // System prompt is passed as first user turn + model acknowledgement
+  const geminiContents = [
+    { role: 'user',  parts: [{ text: systemPrompt }] },
+    { role: 'model', parts: [{ text: 'Understood. I am VesselAI, ready to assist.' }] },
+    ...messages
+      .filter(m => m.content && m.content.trim())
+      .map(m => ({
+        role: m.role === 'user' ? 'user' : 'model',
+        parts: [{ text: String(m.content).slice(0, 2000) }],
+      })),
+  ];
+
   try {
-    const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
+    const geminiRes = await fetch(GEMINI_URL, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 1024,
-        system: systemPrompt,
-        messages: sanitisedMessages,
+        contents: geminiContents,
+        generationConfig: {
+          maxOutputTokens: 1024,
+          temperature: 0.7,
+        },
+        safetySettings: [
+          { category: 'HARM_CATEGORY_HARASSMENT',        threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
+          { category: 'HARM_CATEGORY_HATE_SPEECH',       threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
+          { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
+          { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
+        ],
       }),
     });
 
-    const data = await anthropicRes.json();
+    const data = await geminiRes.json();
 
-    if (!anthropicRes.ok) {
-      console.error('Anthropic error:', data);
+    if (!geminiRes.ok) {
+      console.error('Gemini error:', JSON.stringify(data));
       return res.status(502).json({
         error: data.error?.message || 'AI service error. Please try again.',
-        code: 'ANTHROPIC_ERROR',
+        code: 'GEMINI_ERROR',
       });
     }
 
-    if (data.content && data.content[0]) {
-      return res.json({ reply: data.content[0].text });
+    const reply = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (reply) {
+      return res.json({ reply });
+    }
+
+    // Handle safety blocks
+    const finishReason = data.candidates?.[0]?.finishReason;
+    if (finishReason === 'SAFETY') {
+      return res.json({ reply: "I can't help with that specific request. Please ask me anything about your vessel, seamanship, or marine safety." });
     }
 
     return res.status(502).json({ error: 'Unexpected response from AI service.' });
@@ -146,5 +158,6 @@ app.post('/chat', dailyLimiter, chatLimiter, async (req, res) => {
 // ─── Start ────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`VesselAI server running on port ${PORT}`);
+  console.log(`AI: Google Gemini 1.5 Flash (free tier)`);
   console.log(`Health check: http://localhost:${PORT}/health`);
 });
